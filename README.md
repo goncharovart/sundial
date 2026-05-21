@@ -57,7 +57,7 @@ That's a fully distributed-safe scheduler: spin up multiple processes with the s
 go get github.com/goncharovart/sundial@latest
 ```
 
-Requirements: **Go 1.22+**, **PostgreSQL 14+**.
+Requirements: **Go 1.25+**, **PostgreSQL 14+**.
 
 ## How it works (brief)
 
