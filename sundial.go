@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -48,8 +49,10 @@ var (
 // Scheduler; multi-tenancy is achieved by sharing the same database across
 // processes, not by running multiple Schedulers per process.
 type Scheduler struct {
-	pool *pgxpool.Pool
-	opts Options
+	pool    *pgxpool.Pool
+	storage Storage
+	logger  *slog.Logger
+	opts    Options
 
 	mu      sync.RWMutex
 	jobs    map[string]*Job
@@ -57,12 +60,49 @@ type Scheduler struct {
 	stopped bool
 }
 
+// SchedulerOption mutates a Scheduler after construction. It exists for
+// testing seams (WithStorage swaps in MemoryStorage) without expanding
+// the public Options struct.
+type SchedulerOption func(*Scheduler)
+
+// WithStorage overrides the default Postgres-backed storage. Production
+// code should normally let Scheduler construct PostgresStorage from the
+// pool; tests use WithStorage(NewMemoryStorage()).
+func WithStorage(s Storage) SchedulerOption {
+	return func(sc *Scheduler) {
+		if s != nil {
+			sc.storage = s
+		}
+	}
+}
+
+// WithLogger overrides the default slog logger.
+func WithLogger(l *slog.Logger) SchedulerOption {
+	return func(sc *Scheduler) {
+		if l != nil {
+			sc.logger = l
+		}
+	}
+}
+
+// lookup returns the registered job by name or nil.
+func (s *Scheduler) lookup(name string) *Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.jobs[name]
+}
+
 // New constructs a Scheduler. The pool must already be connected; New does not
 // open connections itself. Validation of options happens here so misconfiguration
 // surfaces at startup rather than on the first tick.
-func New(pool *pgxpool.Pool, opts Options) (*Scheduler, error) {
+//
+// Pass WithStorage(NewMemoryStorage()) to use the in-memory backend (tests).
+// Without it, Scheduler will create a PostgresStorage from the pool when Run
+// starts.
+func New(pool *pgxpool.Pool, opts Options, schedOpts ...SchedulerOption) (*Scheduler, error) {
 	if pool == nil {
-		return nil, errors.New("sundial: pool is required")
+		// MemoryStorage path: pool is allowed to be nil if WithStorage is supplied.
+		// We validate after applying schedOpts below.
 	}
 	if opts.NodeID == "" {
 		return nil, ErrEmptyNodeID
@@ -79,11 +119,23 @@ func New(pool *pgxpool.Pool, opts Options) (*Scheduler, error) {
 	if opts.Schema == "" {
 		opts.Schema = "public"
 	}
-	return &Scheduler{
-		pool: pool,
-		opts: opts,
-		jobs: make(map[string]*Job),
-	}, nil
+
+	sc := &Scheduler{
+		pool:   pool,
+		opts:   opts,
+		jobs:   make(map[string]*Job),
+		logger: slog.Default(),
+	}
+	for _, apply := range schedOpts {
+		apply(sc)
+	}
+	if sc.storage == nil {
+		if pool == nil {
+			return nil, errors.New("sundial: either pool or WithStorage(...) is required")
+		}
+		sc.storage = NewPostgresStorage(pool, opts.Schema)
+	}
+	return sc, nil
 }
 
 // Schedule registers a job with this Scheduler. It does not persist the job
@@ -157,13 +209,13 @@ func (s *Scheduler) Stop() {
 	s.stopped = true
 }
 
-// Run blocks while the dispatcher loop runs, returning when ctx is cancelled
-// or a fatal error occurs.
+// Run drives the dispatcher loop until ctx is cancelled. On cancel it
+// stops accepting new fires, waits up to ShutdownGrace for in-flight
+// handlers to finish, then returns ctx.Err().
 //
-// The dispatcher loop is not yet implemented; this method returns immediately
-// with a sentinel so callers can compile against the final API.
-//
-//nolint:revive // intentional pre-MVP stub; will land in a follow-up commit.
+// Before the first tick, Run persists every registered job to storage
+// via EnsureJob so other nodes sharing the same database become aware
+// of them.
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.mu.Lock()
 	if s.running {
@@ -171,17 +223,38 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return errors.New("sundial: Run is already in progress")
 	}
 	s.running = true
+	jobs := make([]*Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		jobs = append(jobs, j)
+	}
 	s.mu.Unlock()
 
-	// Real dispatcher loop arrives in feat(dispatcher). For now we honour
-	// ctx so callers can integrate with their lifecycle in advance of the
-	// real implementation.
-	<-ctx.Done()
+	now := time.Now().UTC()
+	for _, j := range jobs {
+		next := j.Schedule.Next(now)
+		if next.IsZero() {
+			continue
+		}
+		if _, err := s.storage.EnsureJob(ctx, j, next); err != nil {
+			s.markStopped()
+			return fmt.Errorf("sundial: ensure %q: %w", j.Name, err)
+		}
+	}
 
+	d := &dispatcher{
+		scheduler: s,
+		storage:   s.storage,
+		logger:    s.logger,
+	}
+	err := d.run(ctx)
+	s.markStopped()
+	return err
+}
+
+func (s *Scheduler) markStopped() {
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
-	return ctx.Err()
 }
 
 // JobOption mutates a JobOptions value. Used with Schedule to keep the

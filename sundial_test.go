@@ -154,7 +154,10 @@ func TestJobs_SortedByName(t *testing.T) {
 }
 
 func TestRun_ReturnsOnContextCancel(t *testing.T) {
-	s, _ := New(fakePool(t), Options{NodeID: "n1"})
+	s, err := New(nil, Options{NodeID: "n1"}, WithStorage(NewMemoryStorage()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -173,3 +176,129 @@ func TestRun_ReturnsOnContextCancel(t *testing.T) {
 		t.Fatal("Run did not return within 1s of cancel")
 	}
 }
+
+// TestRun_ExecutesJob is the end-to-end integration test for the
+// dispatcher: register a job that fires immediately, run the scheduler
+// briefly, and verify the handler executed and the run was recorded.
+func TestRun_ExecutesJob(t *testing.T) {
+	mem := NewMemoryStorage()
+	s, err := New(nil, Options{
+		NodeID:        "test-node",
+		TickInterval:  100 * time.Millisecond,
+		ShutdownGrace: 500 * time.Millisecond,
+	}, WithStorage(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var hits int32
+	done := make(chan struct{}, 1)
+	every, _ := Every(time.Second)
+	_, err = s.Schedule("ping", every, func(ctx context.Context) error {
+		atomicInc(&hits)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// EnsureJob inserts the job with next_fire = now + 1s. We rewind
+	// it to "now" so the dispatcher picks it up on the first tick.
+	for _, j := range mem.jobs {
+		j.NextFireTime = time.Now().Add(-time.Second)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	runCh := make(chan error, 1)
+	go func() { runCh <- s.Run(ctx) }()
+
+	select {
+	case <-done:
+		// handler fired at least once
+	case <-time.After(1500 * time.Millisecond):
+		cancel()
+		<-runCh
+		t.Fatalf("handler did not fire within 1.5s (hits=%d)", loadAtomic(&hits))
+	}
+
+	cancel()
+	<-runCh
+
+	runs := mem.Runs()
+	if len(runs) == 0 {
+		t.Fatal("expected at least one recorded run")
+	}
+	if runs[0].Outcome != RunSucceeded {
+		t.Errorf("first run outcome = %q, want %q", runs[0].Outcome, RunSucceeded)
+	}
+	if runs[0].NodeID != "test-node" {
+		t.Errorf("NodeID = %q, want %q", runs[0].NodeID, "test-node")
+	}
+}
+
+func TestRun_HandlerPanicIsRecovered(t *testing.T) {
+	mem := NewMemoryStorage()
+	s, err := New(nil, Options{
+		NodeID:        "panic-node",
+		TickInterval:  100 * time.Millisecond,
+		ShutdownGrace: 500 * time.Millisecond,
+	}, WithStorage(mem))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fired := make(chan struct{}, 1)
+	every, _ := Every(time.Second)
+	_, err = s.Schedule("boom", every, func(ctx context.Context) error {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+		panic("intentional test panic")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range mem.jobs {
+		j.NextFireTime = time.Now().Add(-time.Second)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	runCh := make(chan error, 1)
+	go func() { runCh <- s.Run(ctx) }()
+
+	select {
+	case <-fired:
+	case <-time.After(1500 * time.Millisecond):
+		cancel()
+		<-runCh
+		t.Fatal("handler never fired")
+	}
+
+	cancel()
+	<-runCh
+
+	runs := mem.Runs()
+	if len(runs) == 0 {
+		t.Fatal("expected at least one recorded run despite panic")
+	}
+	if runs[0].Outcome != RunFailed {
+		t.Errorf("panic outcome = %q, want %q", runs[0].Outcome, RunFailed)
+	}
+	if runs[0].Error == "" {
+		t.Error("Error field should describe the panic")
+	}
+}
+
+// atomicInc / loadAtomic are tiny helpers so the test does not import
+// sync/atomic just for two calls.
+func atomicInc(p *int32) { *p++ }
+func loadAtomic(p *int32) int32 { return *p }
