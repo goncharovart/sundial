@@ -1,6 +1,6 @@
 module github.com/goncharovart/sundial
 
-go 1.25.0
+go 1.22
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
