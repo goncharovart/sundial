@@ -15,20 +15,37 @@ Sundial schedules and runs background jobs in Go, on top of a Postgres database 
 
 ## Why Sundial
 
-Existing Go schedulers stop short of what production needs:
+The Go ecosystem has good options at both ends of the scheduling
+spectrum — `robfig/cron` and `gocron` are single-node in-process, and
+Temporal is a full distributed workflow engine. The middle is what's
+missing: cron semantics with Postgres durability that scales beyond a
+single node, without bringing in Redis, Kafka, or a separate workflow
+cluster.
 
-| Capability                           | `robfig/cron` | `go-co-op/gocron` | `hibiken/asynq` | `riverqueue/river` | **Sundial** |
-|--------------------------------------|:-------------:|:-----------------:|:---------------:|:------------------:|:-----------:|
-| Cron syntax                          | ✅            | ✅                | ⚠️ helper       | ⚠️ helper          | ✅          |
-| Persistent jobs (survive restart)    | ❌            | ❌ (open #533)    | ✅ (Redis)      | ✅ (Postgres)      | ✅ (Postgres) |
-| Distributed / multi-node             | ❌            | ❌                | ✅              | ✅                 | ✅          |
-| Leader election                      | ❌            | ❌                | n/a             | n/a                | ✅ (PG advisory locks) |
-| Missed-fire recovery after downtime  | ❌            | ❌                | ⚠️              | ⚠️                 | ✅          |
-| Schedule-first API (cron-style)      | ✅            | ✅                | ❌ (queue-first)| ❌ (queue-first)   | ✅          |
-| Web UI                               | ❌            | ❌                | ✅              | ✅                 | 🚧 planned  |
-| OpenTelemetry traces/metrics built-in| ❌            | ❌                | ⚠️ external     | ⚠️ external        | ✅          |
+| Capability                            | `robfig/cron` | `gocron` | `asynq` | `riverqueue/river` | **Sundial** |
+|---------------------------------------|:-------------:|:--------:|:-------:|:------------------:|:-----------:|
+| Cron syntax (`0 3 * * *`)             | ✅            | ✅       | ⚠️ helper | ⚠️ helper        | ✅          |
+| Survives restart (persistent state)   | ❌            | ❌ ([#533][gocron533]) | ✅ (Redis) | ✅ (Postgres) | ✅ (Postgres) |
+| Distributed across multiple nodes     | ❌            | ❌       | ✅       | ✅                 | ✅          |
+| Schedule-first API (you write "@hourly", not "enqueue X") | ✅ | ✅ | ❌ queue-first | ❌ queue-first | ✅ |
+| Leader election for cluster chores    | ❌            | ❌       | n/a     | n/a                | ✅ (PG advisory lock) |
+| Missed-fire recovery after downtime   | ❌            | ❌       | ⚠️ partial | ⚠️ partial      | ✅ Skip / RunOnce |
+| Exponential-backoff retry + jitter    | ❌            | ❌       | ✅       | ✅                 | ✅          |
+| Dead-letter outcome on exhaustion     | ❌            | ❌       | ✅       | ✅                 | ✅          |
+| OpenTelemetry traces + metrics out of the box | ❌    | ❌       | ⚠️ external | ⚠️ external    | ✅          |
+| External dependencies beyond Postgres | none          | none     | Redis   | none               | none        |
 
-Sundial is for the case where you want **cron semantics with Postgres durability** and need to **scale beyond a single node** without bringing in Redis, Kafka, or Temporal.
+[gocron533]: https://github.com/go-co-op/gocron/issues/533
+
+### When to pick what
+
+- **Single-node cron job inside your binary** → `robfig/cron`. Smallest surface.
+- **A pile of asynchronous tasks fanned out to workers** → `asynq` (Redis) or `riverqueue/river` (Postgres). Both are *queue-first*; you enqueue work, the system decides when to run it.
+- **Cron jobs that must run exactly once across N nodes, survive restart, and report SLO-grade metrics** → Sundial. That's the niche.
+
+If you need long-running, multi-step, retry-with-compensation workflows
+(saga, business processes with timeouts and waits) → Temporal /
+Cadence / DBOS — Sundial is intentionally not that.
 
 ## Quickstart
 
