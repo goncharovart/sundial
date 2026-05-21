@@ -1,13 +1,16 @@
-// Command hello demonstrates the Sundial public API.
+// Command hello demonstrates the Sundial public API end-to-end.
 //
-// It does NOT execute jobs yet — the dispatcher loop lands in a follow-up
-// commit. What this example shows is the call-site shape downstream code
-// will use once the dispatcher is wired up. It registers three jobs with
-// different schedules, prints the registry, then waits for Ctrl-C to
-// exercise graceful shutdown.
+// It registers three jobs with different schedules and runs the
+// dispatcher until Ctrl-C. By default it uses an in-memory backend so
+// the example needs no infrastructure. Pass DATABASE_URL to use a real
+// Postgres instance instead.
 //
 // Run it:
 //
+//	# in-memory (zero setup)
+//	go run ./examples/hello
+//
+//	# Postgres
 //	export DATABASE_URL=postgres://sundial:sundial@localhost:5432/sundial?sslmode=disable
 //	go run ./examples/hello
 package main
@@ -30,55 +33,66 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		logger.Error("DATABASE_URL is required")
-		os.Exit(1)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		logger.Error("connect to Postgres", "error", err)
-		os.Exit(1)
-	}
-	defer pool.Close()
-
-	s, err := sundial.New(pool, sundial.Options{
+	opts := sundial.Options{
 		NodeID:       hostnameOr("hello-node"),
 		TickInterval: time.Second,
-	})
+	}
+
+	var schedOpts []sundial.SchedulerOption
+	var pool *pgxpool.Pool
+
+	if url := os.Getenv("DATABASE_URL"); url != "" {
+		var err error
+		pool, err = pgxpool.New(ctx, url)
+		if err != nil {
+			logger.Error("connect to Postgres", "error", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		logger.Info("using Postgres backend", "url", redacted(url))
+	} else {
+		schedOpts = append(schedOpts, sundial.WithStorage(sundial.NewMemoryStorage()))
+		logger.Info("using in-memory backend (set DATABASE_URL for Postgres)")
+	}
+	schedOpts = append(schedOpts, sundial.WithLogger(logger))
+
+	s, err := sundial.New(pool, opts, schedOpts...)
 	if err != nil {
 		logger.Error("create scheduler", "error", err)
 		os.Exit(1)
 	}
 
-	hourly, _ := sundial.Cron("@hourly")
-	every10s, _ := sundial.Every(10 * time.Second)
+	every5s, _ := sundial.Every(5 * time.Second)
+	every12s, _ := sundial.Every(12 * time.Second)
 	tomorrow := sundial.At(time.Now().Add(24 * time.Hour))
 
-	register(s, logger, "report-hourly", hourly, func(ctx context.Context) error {
-		logger.Info("generating hourly report")
+	var hourlyHits, probeHits int
+
+	register(s, logger, "report-every-12s", every12s, func(_ context.Context) error {
+		hourlyHits++
+		logger.Info("report fired", "total", hourlyHits)
 		return nil
 	}, sundial.WithLeaderOnly())
 
-	register(s, logger, "health-probe", every10s, func(ctx context.Context) error {
-		logger.Info("probing dependencies")
+	register(s, logger, "health-probe-5s", every5s, func(_ context.Context) error {
+		probeHits++
+		logger.Info("health probe", "total", probeHits)
 		return nil
 	})
 
-	register(s, logger, "send-launch-email", tomorrow, func(ctx context.Context) error {
-		logger.Info("sending launch email", "fire_time", time.Now())
+	register(s, logger, "send-launch-email", tomorrow, func(_ context.Context) error {
+		logger.Info("would send launch email")
 		return nil
 	}, sundial.WithMissedFire(sundial.MissedFireRunOnce))
 
 	for _, j := range s.Jobs() {
-		fmt.Printf("  registered: %-20s  %s  (kind=%s)\n", j.Name, j.Schedule.String(), j.Schedule.Kind())
+		fmt.Printf("  registered: %-22s  %s  (kind=%s)\n", j.Name, j.Schedule.String(), j.Schedule.Kind())
 	}
 
-	logger.Info("scheduler ready (dispatcher loop arrives in a follow-up commit) — Ctrl-C to exit")
+	logger.Info("scheduler running — Ctrl-C to exit cleanly")
 	if err := s.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("scheduler exited with error", "error", err)
 		os.Exit(1)
@@ -106,4 +120,26 @@ func hostnameOr(fallback string) string {
 		return fallback
 	}
 	return h
+}
+
+func redacted(url string) string {
+	// Strip credentials from the connection string for log output.
+	at := -1
+	for i := 0; i < len(url); i++ {
+		if url[i] == '@' {
+			at = i
+		}
+	}
+	if at < 0 {
+		return url
+	}
+	// keep scheme prefix
+	scheme := ""
+	for i := 0; i < len(url)-2; i++ {
+		if url[i] == ':' && url[i+1] == '/' && url[i+2] == '/' {
+			scheme = url[:i+3]
+			break
+		}
+	}
+	return scheme + "***" + url[at:]
 }
