@@ -18,6 +18,7 @@ import (
 type dispatcher struct {
 	scheduler *Scheduler
 	storage   Storage
+	leader    Leader
 	logger    *slog.Logger
 	telemetry *telemetry
 	inFlight  sync.WaitGroup
@@ -30,6 +31,19 @@ func (d *dispatcher) run(ctx context.Context) error {
 	ticker := time.NewTicker(d.scheduler.opts.TickInterval)
 	defer ticker.Stop()
 
+	// Best-effort initial leader attempt before the first tick so a
+	// LeaderOnly job whose fire is already due doesn't get skipped
+	// on the very first cycle when it could have been us.
+	d.maybeRenewLeader(ctx)
+
+	var leaderTicker *time.Ticker
+	var leaderC <-chan time.Time
+	if d.leader != nil {
+		leaderTicker = time.NewTicker(d.scheduler.opts.LeaderRenewInterval)
+		defer leaderTicker.Stop()
+		leaderC = leaderTicker.C
+	}
+
 	// Run one tick immediately so jobs whose next_fire is in the past
 	// at startup do not wait for the first ticker fire.
 	d.tick(ctx)
@@ -41,7 +55,29 @@ func (d *dispatcher) run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			d.tick(ctx)
+		case <-leaderC:
+			d.maybeRenewLeader(ctx)
 		}
+	}
+}
+
+// maybeRenewLeader is a single try-acquire attempt for the cluster
+// leader role. Postgres releases the advisory lock automatically when
+// the leader's connection closes, so a crashed leader naturally
+// liberates the role within seconds — non-leaders pick it up here on
+// the next renewal tick.
+func (d *dispatcher) maybeRenewLeader(ctx context.Context) {
+	if d.leader == nil {
+		return
+	}
+	was := d.leader.IsLeader()
+	ok, err := d.leader.TryAcquire(ctx, d.scheduler.opts.NodeID)
+	if err != nil {
+		d.logger.Warn("leader try-acquire", "error", err)
+		return
+	}
+	if ok && !was {
+		d.logger.Info("became leader", "node", d.scheduler.opts.NodeID)
 	}
 }
 
@@ -81,6 +117,15 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		// The DB knows about this job but this process never
 		// registered a handler for it. That is legitimate when
 		// multiple binaries share a database — silently ignore.
+		return
+	}
+
+	// LeaderOnly jobs are coordination hints, not fences — the
+	// ClaimJob race below would still guarantee single-execution
+	// across nodes. But by short-circuiting here we keep the wire
+	// traffic of failed claim attempts to a minimum on follower
+	// nodes, which matters when the dispatcher has hundreds of jobs.
+	if job.Options.LeaderOnly && d.leader != nil && !d.leader.IsLeader() {
 		return
 	}
 

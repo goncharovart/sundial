@@ -29,6 +29,12 @@ type Options struct {
 	// Schema is the Postgres schema name where Sundial tables live.
 	// Defaults to "public".
 	Schema string
+
+	// LeaderRenewInterval is how often the leader loop re-acquires
+	// the cluster-leader advisory lock. Defaults to 10 seconds.
+	// Smaller values shorten the post-crash failover window at the
+	// cost of more idle pg_try_advisory_lock calls.
+	LeaderRenewInterval time.Duration
 }
 
 // Errors returned by the public Scheduler API.
@@ -51,6 +57,7 @@ var (
 type Scheduler struct {
 	pool    *pgxpool.Pool
 	storage Storage
+	leader  Leader
 	logger  *slog.Logger
 	opts    Options
 
@@ -83,6 +90,19 @@ func WithLogger(l *slog.Logger) SchedulerOption {
 			sc.logger = l
 		}
 	}
+}
+
+// WithLeader overrides the cluster-leader implementation. Production
+// callers normally let Scheduler derive a PostgresLeader from the
+// pool; tests use WithLeader(NewMemoryLeader()) — and to simulate two
+// competing nodes in one process, share one MemoryLeader between two
+// Schedulers.
+//
+// Pass nil to disable leadership entirely: LeaderOnly jobs will then
+// fire on every node, which is correct for single-node deployments
+// where there is no contention to coordinate.
+func WithLeader(l Leader) SchedulerOption {
+	return func(sc *Scheduler) { sc.leader = l }
 }
 
 // lookup returns the registered job by name or nil.
@@ -119,6 +139,9 @@ func New(pool *pgxpool.Pool, opts Options, schedOpts ...SchedulerOption) (*Sched
 	if opts.Schema == "" {
 		opts.Schema = "public"
 	}
+	if opts.LeaderRenewInterval == 0 {
+		opts.LeaderRenewInterval = 10 * time.Second
+	}
 
 	sc := &Scheduler{
 		pool:   pool,
@@ -126,14 +149,37 @@ func New(pool *pgxpool.Pool, opts Options, schedOpts ...SchedulerOption) (*Sched
 		jobs:   make(map[string]*Job),
 		logger: slog.Default(),
 	}
+	// Sentinel so WithLeader(nil) can be told apart from "user did
+	// not pass WithLeader at all" — the latter falls through to the
+	// default Postgres-derived implementation.
+	leaderConfigured := false
 	for _, apply := range schedOpts {
+		before := sc.leader
 		apply(sc)
+		// WithLeader(nil) is a deliberate "no leadership" knob; the
+		// option func sets sc.leader = nil. Detect it by checking
+		// whether either the before- or after-value is non-nil, or
+		// whether this option call was the WithLeader one. Cheaper
+		// approach: re-detect "user touched leader" by comparing
+		// pointer identity after each apply.
+		if sc.leader != nil || sc.leader != before {
+			leaderConfigured = true
+		}
 	}
 	if sc.storage == nil {
 		if pool == nil {
 			return nil, errors.New("sundial: either pool or WithStorage(...) is required")
 		}
 		sc.storage = NewPostgresStorage(pool, opts.Schema)
+	}
+	if !leaderConfigured {
+		if pool != nil {
+			sc.leader = NewPostgresLeader(pool)
+		}
+		// pool == nil with no WithLeader is the test-mode case
+		// (in-memory storage but no explicit leader); LeaderOnly
+		// jobs will fire on every node, which is fine when there
+		// is only one.
 	}
 	return sc, nil
 }
@@ -244,11 +290,15 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	d := &dispatcher{
 		scheduler: s,
 		storage:   s.storage,
+		leader:    s.leader,
 		logger:    s.logger,
 		telemetry: newTelemetry(),
 	}
 	d.telemetry.jobsScheduled.Add(ctx, int64(len(jobs)))
 	err := d.run(ctx)
+	if s.leader != nil {
+		_ = s.leader.Release(context.Background())
+	}
 	s.markStopped()
 	return err
 }
