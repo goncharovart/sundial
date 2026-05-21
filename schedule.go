@@ -76,10 +76,5 @@ func (s atSchedule) Next(after time.Time) time.Time {
 func (s atSchedule) String() string { return s.t.Format(time.RFC3339) }
 func (s atSchedule) Kind() string   { return "at" }
 
-// Cron will return a Schedule parsed from a standard 5-field cron expression.
-//
-// Not yet implemented (will wrap robfig/cron/v3 in a later commit). The signature
-// is exported now so downstream code can be written against the final API.
-func Cron(expr string) (Schedule, error) {
-	return nil, fmt.Errorf("%w: cron parser not yet implemented (expr=%q)", ErrInvalidSchedule, expr)
-}
+// Cron is defined in cron.go to keep the robfig/cron import isolated from the
+// rest of the package surface.

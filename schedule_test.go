@@ -74,9 +74,3 @@ func TestAt(t *testing.T) {
 	})
 }
 
-func TestCron_NotYetImplemented(t *testing.T) {
-	_, err := Cron("0 3 * * *")
-	if !errors.Is(err, ErrInvalidSchedule) {
-		t.Fatalf("expected ErrInvalidSchedule wrapper while cron is not implemented, got %v", err)
-	}
-}
