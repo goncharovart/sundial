@@ -78,3 +78,28 @@ func (s atSchedule) Kind() string   { return "at" }
 
 // Cron is defined in cron.go to keep the robfig/cron import isolated from the
 // rest of the package surface.
+
+// iterateSchedule returns every fire time strictly after `from` and
+// strictly before `until`, capped at `limit` entries. It is the
+// generic backbone of MissedFireRunAll — given any Schedule, it
+// produces the missed-fire iterator by repeated calls to Next.
+//
+// The strict `< until` boundary matters: catch-up should not execute
+// a fire whose time is "now" yet, because the regular tick loop is
+// about to pick it up through ClaimJob. RunAll is for the missed
+// window only.
+func iterateSchedule(s Schedule, from, until time.Time, limit int) []time.Time {
+	if s == nil || !from.Before(until) || limit <= 0 {
+		return nil
+	}
+	out := make([]time.Time, 0, limit)
+	t := from
+	for len(out) < limit {
+		t = s.Next(t)
+		if t.IsZero() || !t.Before(until) {
+			return out
+		}
+		out = append(out, t)
+	}
+	return out
+}

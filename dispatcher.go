@@ -199,6 +199,19 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		return
 	}
 
+	if missed && job.Options.MissedFire == MissedFireRunAll {
+		// RunAll iterates every missed instant strictly inside
+		// (NextFireTime, now), emitting one execution per fire.
+		// This is leader-only: in a multi-node cluster only the
+		// leader replays the window, otherwise N nodes would
+		// each emit the full catch-up volume.
+		if d.leader != nil && !d.leader.IsLeader() {
+			return
+		}
+		d.runAllMissed(ctx, job, dj, now)
+		return
+	}
+
 	claimed, err := d.storage.ClaimJob(ctx, dj.ID, nextFire)
 	if err != nil {
 		d.logger.Error("claim job", "job", dj.Name, "error", err)
@@ -219,6 +232,8 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		)
 	}
 
+	// Regular concurrent dispatch — handler runs in its own goroutine
+	// so the tick loop can keep claiming other jobs.
 	d.inFlight.Add(1)
 	go d.execute(ctx, job, dj, nextFire)
 }
@@ -327,6 +342,86 @@ func (d *dispatcher) execute(parent context.Context, job *Job, dj DueJob, claime
 	}
 
 	_ = claimedFor // reserved for future retry-by-attempt logic
+}
+
+// runAllMissed replays every missed fire time in the window
+// (dj.NextFireTime, now), in order. Each instant goes through the
+// usual claim/execute/record pipeline so existing observability
+// (spans, run records, retry budget) applies uniformly to catch-up
+// fires and live fires. After the iterator drains, the loop falls
+// back to the regular cadence — the next ClaimJob on a non-missed
+// schedule sets next_fire to a future instant.
+//
+// The window is capped at maxCatchupInstants to defend against a
+// pathological "down for a month at 1s cadence" scenario where the
+// iterator would otherwise emit ~2.5M handler calls in one tick.
+const maxCatchupInstants = 256
+
+func (d *dispatcher) runAllMissed(ctx context.Context, job *Job, dj DueJob, now time.Time) {
+	sched, err := loadScheduleFromDue(dj)
+	if err != nil {
+		d.logger.Error("missed-fire iterator: load schedule", "job", dj.Name, "error", err)
+		return
+	}
+	instants := iterateSchedule(sched, dj.NextFireTime, now, maxCatchupInstants)
+	if len(instants) == 0 {
+		// Single catch-up fire even if the iterator yielded nothing
+		// — RunOnce semantics, since we know the window was missed.
+		d.executeAtFire(ctx, job, dj)
+		return
+	}
+	d.logger.Info("missed fire RunAll replay",
+		"job", dj.Name,
+		"instants", len(instants),
+		"window_start", dj.NextFireTime,
+		"window_end", now,
+	)
+	for _, fireTime := range instants {
+		ddj := dj
+		ddj.NextFireTime = fireTime
+		d.executeAtFire(ctx, job, ddj)
+	}
+	// After replay, advance to the next future fire so the regular
+	// loop does not see the row as missed on the next tick.
+	if future := sched.Next(now); !future.IsZero() {
+		if _, err := d.storage.ClaimJob(ctx, dj.ID, future); err != nil {
+			d.logger.Error("missed-fire RunAll: advance next_fire", "job", dj.Name, "error", err)
+		}
+	}
+}
+
+// executeAtFire is a thin wrapper used by both the regular tick path
+// and the RunAll iterator: bump in-flight, run execute() synchronously
+// (the iterator MUST serialise — a 5-fire RunAll should not spawn 5
+// goroutines that race for the same retry counter).
+func (d *dispatcher) executeAtFire(ctx context.Context, job *Job, dj DueJob) {
+	d.inFlight.Add(1)
+	d.execute(ctx, job, dj, dj.NextFireTime)
+}
+
+// loadScheduleFromDue rehydrates a Schedule from the persisted (kind,
+// expression) pair. This is the same parsing the dispatcher does in
+// computeNextFire — we keep both paths through one helper so adding a
+// new schedule kind only requires touching one switch.
+func loadScheduleFromDue(dj DueJob) (Schedule, error) {
+	switch dj.ScheduleKind {
+	case "cron":
+		return Cron(dj.ScheduleExpr)
+	case "every":
+		d, err := time.ParseDuration(dj.ScheduleExpr)
+		if err != nil {
+			return nil, err
+		}
+		return Every(d)
+	case "at":
+		t, err := time.Parse(time.RFC3339, dj.ScheduleExpr)
+		if err != nil {
+			return nil, err
+		}
+		return At(t), nil
+	default:
+		return nil, fmt.Errorf("unknown schedule kind %q", dj.ScheduleKind)
+	}
 }
 
 // drain blocks until all in-flight handlers finish or ShutdownGrace

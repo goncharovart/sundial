@@ -10,8 +10,18 @@ will be called out under "Changed".
 
 ## [Unreleased]
 
-Nothing yet. Pending milestones live in the [GitHub issues](https://github.com/goncharovart/sundial/issues)
-labelled `good first issue`.
+### Added
+
+- **`MissedFireRunAll` iterator** (closes [#1](https://github.com/goncharovart/sundial/issues/1)):
+  when a job's last fire is far in the past and the policy is `RunAll`,
+  the dispatcher now emits every missed instant strictly inside
+  `(last_fire, now)` in order via a new `iterateSchedule` helper.
+  Iteration is leader-only (so a multi-node cluster does not multiply
+  catch-up volume) and capped at 256 instants per tick (to defend
+  against pathological "down for a month at 1s cadence" scenarios).
+  Each replayed instant goes through the regular claim → execute →
+  record pipeline, so spans, run records, and retry budget all apply
+  uniformly to catch-up fires and live fires.
 
 ## [v0.1.0] — 2026-05-21
 

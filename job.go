@@ -31,9 +31,15 @@ const (
 	// silently missing a window (e.g. user-facing reminders).
 	MissedFireSkip
 
-	// MissedFireRunAll executes every missed fire in order. Use only for
-	// audit-style jobs that must produce one record per fire-time and where
-	// the handler is fast and idempotent.
+	// MissedFireRunAll executes every missed fire in (last_fire, now)
+	// in order, capped at 256 instants per tick to defend against
+	// pathological "down for a month at 1s cadence" scenarios.
+	// Use only for audit-style jobs that must produce one record per
+	// fire-time and where the handler is fast and idempotent.
+	//
+	// Iteration is leader-only: on a multi-node cluster only the
+	// node holding the cluster-leader advisory lock replays the
+	// window, so the handler does not run N times per missed fire.
 	MissedFireRunAll
 )
 
