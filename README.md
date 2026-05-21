@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![README (Russian)](https://img.shields.io/badge/README-Русский-red.svg)](README.ru.md)
 
-> ⚠️ **Pre-release.** Dispatcher MVP and Postgres backend are in; API freezes at `v0.1.0`. Star/watch to follow development.
+> ⚠️ **Experimental v0.1.0.** Built openly as a learning artifact and a serious-shape attempt at the niche. NOT production-tested in a real deployment yet — the dispatcher, storage, leader election, retry, and missed-fire policies all pass their unit tests, but the v0.1.x API surface stays unstable until at least one external user reports back from a real cluster. Star/watch to follow development.
 
 ---
 
