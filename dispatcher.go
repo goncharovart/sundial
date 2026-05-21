@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -22,6 +24,38 @@ type dispatcher struct {
 	logger    *slog.Logger
 	telemetry *telemetry
 	inFlight  sync.WaitGroup
+
+	// attempts tracks per-(job, fire-time) execution attempt counts
+	// so the retry-with-backoff path can decide whether to give up
+	// (dead-letter) or schedule the next retry. The map is kept
+	// in-memory only — a process crash mid-retry resets the counter
+	// to 1, which is acceptable for the MVP because retries land on
+	// real timestamps in storage, so the worst case is one extra
+	// duplicate attempt after a crash.
+	attemptsMu sync.Mutex
+	attempts   map[string]int // keyed by jobID
+}
+
+// bumpAttempt is keyed on jobID alone, not on (jobID, fire_time).
+// fire_time changes every time ScheduleRetry pulls it back, so a
+// per-fire key would always read 1 and the retry budget would never
+// run out. Per-job keys give exactly the semantics we want: a stable
+// counter while the same job is failing, reset to zero on the first
+// successful run after the failure streak.
+func (d *dispatcher) bumpAttempt(jobID string) int {
+	d.attemptsMu.Lock()
+	defer d.attemptsMu.Unlock()
+	if d.attempts == nil {
+		d.attempts = make(map[string]int)
+	}
+	d.attempts[jobID]++
+	return d.attempts[jobID]
+}
+
+func (d *dispatcher) forgetAttempt(jobID string) {
+	d.attemptsMu.Lock()
+	defer d.attemptsMu.Unlock()
+	delete(d.attempts, jobID)
 }
 
 // run drives the loop until ctx is cancelled. It returns ctx.Err() (or
@@ -212,6 +246,8 @@ func (d *dispatcher) execute(parent context.Context, job *Job, dj DueJob, claime
 	startedAt := time.Now().UTC()
 	d.telemetry.recordLag(spanCtx, dj.Name, dj.NextFireTime, startedAt)
 
+	attempt := d.bumpAttempt(dj.ID)
+
 	handlerErr := safeRun(ctx, job.Handler)
 	finishedAt := time.Now().UTC()
 
@@ -224,13 +260,47 @@ func (d *dispatcher) execute(parent context.Context, job *Job, dj DueJob, claime
 	}
 	d.telemetry.recordDuration(spanCtx, span, dj.Name, finishedAt.Sub(startedAt), outcome)
 
+	// Retry-with-backoff: on failure, if we have attempts left,
+	// pull the row's next_fire back to "now + backoff" so the next
+	// tick re-dispatches this same fire. On a successful run (or
+	// when the retry budget is exhausted) we forget the counter so
+	// the next regular fire starts fresh.
+	if handlerErr != nil && attempt < job.Options.Retry.MaxAttempts {
+		backoff := computeBackoff(job.Options.Retry, attempt)
+		retryAt := time.Now().UTC().Add(backoff)
+		if err := d.storage.ScheduleRetry(parent, dj.ID, retryAt); err != nil {
+			d.logger.Error("schedule retry",
+				"job", dj.Name,
+				"attempt", attempt,
+				"error", err,
+			)
+		} else {
+			d.logger.Info("job failed, retry scheduled",
+				"job", dj.Name,
+				"attempt", attempt,
+				"backoff", backoff,
+				"retry_at", retryAt,
+			)
+		}
+	} else if handlerErr != nil {
+		outcome = RunDeadLetter
+		d.forgetAttempt(dj.ID)
+		d.logger.Warn("job failed and retries exhausted",
+			"job", dj.Name,
+			"attempts", attempt,
+			"error", handlerErr,
+		)
+	} else {
+		d.forgetAttempt(dj.ID)
+	}
+
 	rec := RunRecord{
 		JobID:      dj.ID,
 		FireTime:   dj.NextFireTime,
 		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
 		NodeID:     d.scheduler.opts.NodeID,
-		Attempt:    1,
+		Attempt:    attempt,
 		Outcome:    outcome,
 		Error:      errString,
 	}
@@ -276,6 +346,27 @@ func (d *dispatcher) drain() {
 	case <-time.After(d.scheduler.opts.ShutdownGrace):
 		d.logger.Warn("shutdown grace elapsed with in-flight handlers")
 	}
+}
+
+// computeBackoff returns the wait between attempt and attempt+1, using
+// exponential growth (InitialBackoff × Multiplier^(attempt-1)) clamped
+// to MaxBackoff, then jittered by a uniform factor in [0.5, 1.5).
+//
+// Jitter is the part that matters most under contention — without it,
+// a thundering herd of nodes whose handlers fail at the same instant
+// would all retry in lockstep and hammer the same upstream over and
+// over. The factored jitter spreads retries over a 1× window.
+func computeBackoff(p RetryPolicy, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	base := float64(p.InitialBackoff) * math.Pow(p.Multiplier, float64(attempt-1))
+	if base > float64(p.MaxBackoff) {
+		base = float64(p.MaxBackoff)
+	}
+	// jitter in [0.5, 1.5)
+	jitter := 0.5 + rand.Float64() //nolint:gosec // not crypto-sensitive
+	return time.Duration(base * jitter)
 }
 
 // safeRun invokes the handler and converts a panic into an error so a

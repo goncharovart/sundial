@@ -83,6 +83,15 @@ type Storage interface {
 	// RecordRun persists the outcome of one execution attempt to the
 	// runs table. It is idempotent on (job_id, fire_time, attempt).
 	RecordRun(ctx context.Context, run RunRecord) error
+
+	// ScheduleRetry pulls the job's next_fire_time back to retryAt
+	// when retryAt is earlier than the currently scheduled fire.
+	// Called by the dispatcher after a failed attempt that has not
+	// exhausted its RetryPolicy.MaxAttempts budget.
+	//
+	// No-op when retryAt is at or after the current next_fire — the
+	// regular cadence already fires sooner.
+	ScheduleRetry(ctx context.Context, jobID string, retryAt time.Time) error
 }
 
 // PostgresStorage is the production Storage implementation backed by a
@@ -213,6 +222,21 @@ func (s *PostgresStorage) ClaimJob(ctx context.Context, jobID string, nextFire t
 		return false, fmt.Errorf("sundial: commit claim: %w", err)
 	}
 	return true, nil
+}
+
+// ScheduleRetry pulls next_fire_time back to retryAt if it is sooner
+// than the currently scheduled fire. Otherwise the row is left alone.
+func (s *PostgresStorage) ScheduleRetry(ctx context.Context, jobID string, retryAt time.Time) error {
+	sql := fmt.Sprintf(`
+		UPDATE %s
+		SET next_fire_time = $2, updated_at = now()
+		WHERE id = $1::uuid AND $2 < next_fire_time
+	`, s.qualify("sundial_jobs"))
+
+	if _, err := s.pool.Exec(ctx, sql, jobID, retryAt.UTC()); err != nil {
+		return fmt.Errorf("sundial: schedule retry: %w", err)
+	}
+	return nil
 }
 
 // RecordRun inserts a row into sundial_runs.
@@ -374,6 +398,20 @@ func (m *MemoryStorage) ClaimJob(_ context.Context, jobID string, nextFire time.
 		}
 	}
 	return false, ErrJobNotFound
+}
+
+func (m *MemoryStorage) ScheduleRetry(_ context.Context, jobID string, retryAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, j := range m.jobs {
+		if j.ID == jobID {
+			if retryAt.UTC().Before(j.NextFireTime) {
+				j.NextFireTime = retryAt.UTC()
+			}
+			return nil
+		}
+	}
+	return ErrJobNotFound
 }
 
 func (m *MemoryStorage) RecordRun(_ context.Context, run RunRecord) error {
