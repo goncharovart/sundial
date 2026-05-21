@@ -5,8 +5,10 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/goncharovart/sundial.svg)](https://pkg.go.dev/github.com/goncharovart/sundial)
 [![Go Report Card](https://goreportcard.com/badge/github.com/goncharovart/sundial)](https://goreportcard.com/report/github.com/goncharovart/sundial)
 [![CI](https://github.com/goncharovart/sundial/actions/workflows/ci.yml/badge.svg)](https://github.com/goncharovart/sundial/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/goncharovart/sundial/branch/main/graph/badge.svg)](https://codecov.io/gh/goncharovart/sundial)
 [![Release](https://img.shields.io/github/v/release/goncharovart/sundial?sort=semver&display_name=tag&color=blue)](https://github.com/goncharovart/sundial/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![README (Russian)](https://img.shields.io/badge/README-Русский-red.svg)](README.ru.md)
 
 > ⚠️ **Pre-release.** Dispatcher MVP and Postgres backend are in; API freezes at `v0.1.0`. Star/watch to follow development.
 

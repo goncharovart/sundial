@@ -40,6 +40,14 @@ jobs:
           DATABASE_URL: postgres://sundial:sundial@localhost:5432/sundial?sslmode=disable
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
+      - name: upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          flags: unittests
+          fail_ci_if_error: false
+          verbose: false
+
   lint:
     name: lint
     runs-on: ubuntu-latest
