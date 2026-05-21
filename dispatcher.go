@@ -61,6 +61,19 @@ func (d *dispatcher) tick(ctx context.Context) {
 
 // maybeDispatch tries to claim a single due job and, on success,
 // schedules its handler to run concurrently.
+//
+// If the job's actual fire was missed by significantly more than one
+// tick interval (e.g. the cluster was down across the window), the
+// job's MissedFirePolicy decides what to do:
+//
+//   - MissedFireSkip: record the miss and jump straight to the next
+//     future fire — handler does NOT run for the stale window.
+//   - MissedFireRunOnce: run a single catch-up fire and then advance
+//     to the next future fire. This is the default.
+//   - MissedFireRunAll: run every missed fire in order. Reserved for
+//     audit-style jobs; in this MVP commit we implement Skip and
+//     RunOnce; RunAll degrades to RunOnce until the dedicated
+//     iterator lands in the next milestone.
 func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time) {
 	job := d.scheduler.lookup(dj.Name)
 	if job == nil {
@@ -80,6 +93,32 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		return
 	}
 
+	// A "miss" is any lag larger than 3× the tick interval — that
+	// threshold is conservative enough that ordinary scheduling
+	// jitter never trips it, but small enough that an outage of a
+	// few seconds is caught.
+	missThreshold := 3 * d.scheduler.opts.TickInterval
+	lag := now.Sub(dj.NextFireTime)
+	missed := lag > missThreshold
+
+	if missed && job.Options.MissedFire == MissedFireSkip {
+		// Skip path: advance next_fire forward without executing.
+		// Use the next fire after `now`, not after dj.NextFireTime,
+		// so we don't immediately re-claim again on the next tick.
+		future, ferr := computeNextFire(dj, now)
+		if ferr == nil && !future.IsZero() {
+			if _, claimErr := d.storage.ClaimJob(ctx, dj.ID, future); claimErr != nil {
+				d.logger.Error("skip missed fire", "job", dj.Name, "error", claimErr)
+			}
+		}
+		d.logger.Info("missed fire skipped",
+			"job", dj.Name,
+			"missed_by", lag,
+			"fire_time", dj.NextFireTime,
+		)
+		return
+	}
+
 	claimed, err := d.storage.ClaimJob(ctx, dj.ID, nextFire)
 	if err != nil {
 		d.logger.Error("claim job", "job", dj.Name, "error", err)
@@ -89,6 +128,14 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		// Another node won the race. That is the happy path under
 		// contention — nothing to do.
 		return
+	}
+
+	if missed {
+		d.logger.Info("missed fire recovering (run-once)",
+			"job", dj.Name,
+			"missed_by", lag,
+			"fire_time", dj.NextFireTime,
+		)
 	}
 
 	d.inFlight.Add(1)

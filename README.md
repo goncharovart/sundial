@@ -7,7 +7,7 @@
 [![CI](https://github.com/goncharovart/sundial/actions/workflows/ci.yml/badge.svg)](https://github.com/goncharovart/sundial/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> ⚠️ **Pre-release.** API is unstable until `v0.1.0`. Star/watch the repo to follow development.
+> ⚠️ **Pre-release.** Dispatcher MVP and Postgres backend are in; API freezes at `v0.1.0`. Star/watch to follow development.
 
 ---
 
@@ -70,15 +70,20 @@ Detailed design: [docs/design.md](docs/design.md).
 
 ## Status & roadmap
 
-This is a young project. The roadmap to `v0.1.0`:
+The MVP is in. The roadmap to `v0.1.0`:
 
 - [x] Project scaffold, CI, license
-- [ ] Core scheduler loop with PG advisory locks
-- [ ] Cron expression parser
-- [ ] Missed-fire recovery
-- [ ] OpenTelemetry instrumentation
+- [x] Schedule API — Cron, Every, At
+- [x] Storage layer — Postgres (`pg_try_advisory_xact_lock`) and an
+      in-memory implementation for tests
+- [x] Dispatcher loop with fetch → claim → execute → record
+- [x] Graceful shutdown that drains in-flight handlers
+- [x] Panic recovery so a single bad handler can't take the loop down
+- [x] Runnable example (in-memory by default, Postgres via env)
+- [ ] Missed-fire recovery policies (skip / run-once / run-all)
 - [ ] Job retries with exponential backoff + jitter
-- [ ] First example app (worker pool of nightly jobs)
+- [ ] OpenTelemetry instrumentation (traces, metrics, slog correlation)
+- [ ] Leader election sentinel lock for cluster-wide tasks
 - [ ] Web UI
 
 Open an issue or [start a discussion](https://github.com/goncharovart/sundial/discussions) — design feedback is especially welcome before the API stabilizes.

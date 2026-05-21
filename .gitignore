@@ -1,4 +1,3 @@
-# Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
@@ -36,3 +35,6 @@ vendor/
 *.db
 *.sqlite
 data/
+
+# Local scratch / work-in-progress files that should never reach origin
+.stash/
