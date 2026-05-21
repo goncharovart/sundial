@@ -2,14 +2,46 @@ package sundial
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// AutoNodeID returns a node identifier suitable for Options.NodeID
+// without the caller having to plumb it through environment variables.
+// The resolution order is:
+//
+//  1. os.Hostname() — the canonical container/server name.
+//  2. $HOSTNAME — set by most schedulers (Kubernetes, Nomad) even
+//     when os.Hostname() returns "localhost".
+//  3. "sundial-<8-hex>" — a per-process random fallback so two
+//     scrambled containers in the same pod don't end up sharing a
+//     NodeID. The randomness is from crypto/rand; on the rare boot
+//     where rand.Read fails, we degrade to "sundial-unknown" — a
+//     valid string that satisfies the NodeID requirement, just not
+//     a useful one for debugging.
+//
+// The returned string is non-empty by construction.
+func AutoNodeID() string {
+	if h, err := os.Hostname(); err == nil && h != "" && h != "localhost" {
+		return h
+	}
+	if env := os.Getenv("HOSTNAME"); env != "" {
+		return env
+	}
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err == nil {
+		return "sundial-" + hex.EncodeToString(buf[:])
+	}
+	return "sundial-unknown"
+}
 
 // Options configures a Scheduler at construction time.
 type Options struct {

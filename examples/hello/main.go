@@ -37,7 +37,7 @@ func main() {
 	defer stop()
 
 	opts := sundial.Options{
-		NodeID:       hostnameOr("hello-node"),
+		NodeID:       sundial.AutoNodeID(),
 		TickInterval: time.Second,
 	}
 
@@ -114,6 +114,10 @@ func register(
 	}
 }
 
+// hostnameOr remains in the example as a tiny "do it yourself"
+// reference — sundial.AutoNodeID() does the same thing with a
+// stronger fallback chain. Kept here so contributors can see both
+// shapes side-by-side.
 func hostnameOr(fallback string) string {
 	h, err := os.Hostname()
 	if err != nil {
