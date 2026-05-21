@@ -12,6 +12,11 @@ will be called out under "Changed".
 
 ### Added
 
+- **`AutoNodeID()` helper** (closes [#5](https://github.com/goncharovart/sundial/issues/5)):
+  top-level function returning a non-empty NodeID without the caller
+  having to plumb `os.Hostname()` + `$HOSTNAME` boilerplate. Resolution
+  chain: `os.Hostname()` → `$HOSTNAME` env → `sundial-<8 hex>` from
+  crypto/rand → `"sundial-unknown"` as the always-non-empty floor.
 - **`MissedFireRunAll` iterator** (closes [#1](https://github.com/goncharovart/sundial/issues/1)):
   when a job's last fire is far in the past and the policy is `RunAll`,
   the dispatcher now emits every missed instant strictly inside
@@ -22,6 +27,15 @@ will be called out under "Changed".
   Each replayed instant goes through the regular claim → execute →
   record pipeline, so spans, run records, and retry budget all apply
   uniformly to catch-up fires and live fires.
+
+### Tested
+
+- **`JobOptions.Timeout` enforcement** (closes [#3](https://github.com/goncharovart/sundial/issues/3)):
+  new test asserts a handler blocking on `<-ctx.Done()` observes
+  `context.DeadlineExceeded` when `WithTimeout(200ms)` fires, the
+  resulting `RunRecord` is `RunFailed` with the deadline error
+  surfaced in `Error`, and the recorded duration is bounded by
+  `[150ms, 400ms]` (timeout + cancellation allowance).
 
 ## [v0.1.0] — 2026-05-21
 
