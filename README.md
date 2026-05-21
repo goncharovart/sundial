@@ -80,10 +80,11 @@ The MVP is in. The roadmap to `v0.1.0`:
 - [x] Graceful shutdown that drains in-flight handlers
 - [x] Panic recovery so a single bad handler can't take the loop down
 - [x] Runnable example (in-memory by default, Postgres via env)
-- [ ] Missed-fire recovery policies (skip / run-once / run-all)
-- [ ] Job retries with exponential backoff + jitter
-- [ ] OpenTelemetry instrumentation (traces, metrics, slog correlation)
-- [ ] Leader election sentinel lock for cluster-wide tasks
+- [x] Missed-fire recovery policies — Skip and RunOnce (RunAll iterator next)
+- [x] OpenTelemetry instrumentation (traces, metrics, lag/duration)
+- [x] Leader election via Postgres session-scoped advisory lock
+- [x] Job retries with exponential backoff + jitter; dead-letter on exhaust
+- [ ] MissedFireRunAll iterator (emit every missed instant)
 - [ ] Web UI
 
 Open an issue or [start a discussion](https://github.com/goncharovart/sundial/discussions) — design feedback is especially welcome before the API stabilizes.
