@@ -245,7 +245,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		scheduler: s,
 		storage:   s.storage,
 		logger:    s.logger,
+		telemetry: newTelemetry(),
 	}
+	d.telemetry.jobsScheduled.Add(ctx, int64(len(jobs)))
 	err := d.run(ctx)
 	s.markStopped()
 	return err

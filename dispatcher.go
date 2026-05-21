@@ -19,6 +19,7 @@ type dispatcher struct {
 	scheduler *Scheduler
 	storage   Storage
 	logger    *slog.Logger
+	telemetry *telemetry
 	inFlight  sync.WaitGroup
 }
 
@@ -129,6 +130,7 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 		// contention — nothing to do.
 		return
 	}
+	d.telemetry.claimedInc(ctx, dj.Name)
 
 	if missed {
 		d.logger.Info("missed fire recovering (run-once)",
@@ -147,14 +149,24 @@ func (d *dispatcher) maybeDispatch(ctx context.Context, dj DueJob, now time.Time
 func (d *dispatcher) execute(parent context.Context, job *Job, dj DueJob, claimedFor time.Time) {
 	defer d.inFlight.Done()
 
-	ctx := parent
+	d.telemetry.jobsRunning.Add(parent, 1)
+	defer d.telemetry.jobsRunning.Add(parent, -1)
+
+	spanCtx, span := d.telemetry.startRunSpan(
+		parent, dj.Name, dj.ID, d.scheduler.opts.NodeID, dj.ScheduleKind, dj.NextFireTime,
+	)
+	defer span.End()
+
+	ctx := spanCtx
 	var cancel context.CancelFunc
 	if job.Options.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(parent, job.Options.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, job.Options.Timeout)
 		defer cancel()
 	}
 
 	startedAt := time.Now().UTC()
+	d.telemetry.recordLag(spanCtx, dj.Name, dj.NextFireTime, startedAt)
+
 	handlerErr := safeRun(ctx, job.Handler)
 	finishedAt := time.Now().UTC()
 
@@ -163,7 +175,9 @@ func (d *dispatcher) execute(parent context.Context, job *Job, dj DueJob, claime
 	if handlerErr != nil {
 		outcome = RunFailed
 		errString = handlerErr.Error()
+		span.RecordError(handlerErr)
 	}
+	d.telemetry.recordDuration(spanCtx, span, dj.Name, finishedAt.Sub(startedAt), outcome)
 
 	rec := RunRecord{
 		JobID:      dj.ID,
