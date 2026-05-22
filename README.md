@@ -111,7 +111,14 @@ Open an issue or [start a discussion](https://github.com/goncharovart/sundial/di
 
 ## Contributing
 
-Contributors very welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) (will be added with the first PR). For now: file an issue, propose an approach, then send a PR.
+Contributors very welcome. There are five issues tagged
+[`good first issue`](https://github.com/goncharovart/sundial/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22)
+right now — Prometheus `/metrics` handler, docker-compose 3-node cluster example,
+config sub-package via viper, `Scheduler.JobsInfo()` introspection API, and a
+k8s manifests example. Each one ships with a self-contained scope description,
+estimated effort, and an offer to mentor through the review. If none of those fit,
+file an issue with the change you have in mind first — I'd rather discuss the
+direction before you write code.
 
 ## License
 
