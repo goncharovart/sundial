@@ -23,7 +23,7 @@ in-person event under the Sundial name.
 
 ## Reporting
 
-If something needs an outside eye, email **paladei702@gmail.com**.
+If something needs an outside eye, email **goncharov.artur.02@gmail.com**.
 Reports are kept confidential. The maintainer will acknowledge within
 48 hours and respond with next steps within seven days.
 
