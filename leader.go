@@ -12,11 +12,12 @@ import (
 
 // Leader holds (or fails to hold) the cluster-wide leader role.
 //
-// Sundial uses leadership for one purpose: deciding which node runs
-// `LeaderOnly` jobs and (in a follow-up commit) which node performs
-// missed-fire recovery iteration. Per-job claim races still go through
-// the regular Storage.ClaimJob path — the leader does NOT do anything
-// non-leaders could not do; it is a coordination hint, not a fence.
+// Sundial uses leadership for two purposes: deciding which node runs
+// `LeaderOnly` jobs, and which node performs the missed-fire RunAll
+// recovery iteration. Per-job claim races still go through the
+// regular Storage.ClaimJob path — the leader does NOT do anything
+// non-leaders could not do; it is a coordination hint that lets
+// follower nodes skip the doomed-to-lose claim transaction early.
 //
 // The Postgres implementation holds a session-scoped advisory lock on
 // a dedicated sentinel key. When the holding node dies, Postgres
